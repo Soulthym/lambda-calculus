@@ -2,49 +2,74 @@ from __future__ import annotations
 from ast import dump as ast_dump, parse, NodeVisitor, AST, _Unparser
 from inspect import getsource
 from textwrap import dedent
+from types import CodeType
+from pprint import pp
 from scope import Scope
+from pretty import Pretty
 
 def dump(node):
     return ast_dump(node, indent=4)
 
-class Var:
+def pretty(printer, obj, stream, indent, allowance, context, level):
+    cls_name = obj.__class__.__name__
+    indent += len(cls_name) + 1
+    keys = getattr(obj, "_pretty_fields", None)
+    items = [(k, getattr(obj, k)) for k in keys] if keys else []
+    stream.write(cls_name + '(')
+    printer._format_namespace_items(items, stream, indent, allowance, context, level)
+    stream.write(')')
+
+class Var(metaclass=Pretty):
+    _pretty_fields = ("name",)
     def __init__(self, id: int):
         self.id = id
         name = f"x{self.id}"
         self.name = name
 
     def __repr__(self):
-        return f"Var(name={self.name})"
+        return f"Var(name={self.name!r})"
 
     def __str__(self):
         return self.name
 
-    def __hash__(self):
-        return self.id
+    @staticmethod
+    def __pretty__(printer, self, stream, indent, allowance, context, level):
+        pretty(printer, self, stream, indent, allowance, context, level)
 
-class Lam:
+class Lam(metaclass=Pretty):
     _fields = ("var", "body")
+    _pretty_fields = _fields
     def __init__(self, var: Var, body: Term):
         self.var = var
         self.body = body
 
     def __repr__(self):
-        return f"Lam(var={self.var}, body={self.body})"
+        return f"Lam(var={self.var!r}, body={self.body!r})"
 
     def __str__(self):
         return unparse(self)
 
-class App:
+    @staticmethod
+    def __pretty__(printer, self, stream, indent, allowance, context, level):
+        pretty(printer, self, stream, indent, allowance, context, level)
+
+
+class App(metaclass=Pretty):
     _fields = ("func", "arg")
+    _pretty_fields = _fields
     def __init__(self, func: Term, arg: Term):
         self.func = func
         self.arg = arg
 
     def __repr__(self):
-        return f"App(func={self.func}, arg={self.arg})"
+        return f"App(func={self.func!r}, arg={self.arg!r})"
 
     def __str__(self):
         return unparse(self)
+
+    @staticmethod
+    def __pretty__(printer, self, stream, indent, allowance, context, level):
+        pretty(printer, self, stream, indent, allowance, context, level)
 
 type Term = Lam | App | Var | AST
 
@@ -111,6 +136,16 @@ class CreateLambdaTerm(NodeVisitor):
             func = App(func, self.term)
         self.term = func
 
+def lc(f) -> Term:
+    """Convert a Python lambda function to a lambda calculus term."""
+    src = dedent(getsource(f))
+    ast = parse(src, mode="exec")
+    visitor = CreateLambdaTerm()
+    visitor.visit(ast)
+    # print(visitor.term)
+    # print(visitor.vars)
+    return visitor.term
+
 class Unparser(_Unparser):
     def traverse(self, node):
         if isinstance(node, (Lam, App, Var)):
@@ -140,27 +175,49 @@ def unparse(term: Term) -> str:
     unparser = Unparser()
     return unparser.visit(term)
 
-def lc(f) -> str:
-    """Convert a Python lambda function to a lambda calculus term."""
-    src = dedent(getsource(f))
-    ast = parse(src)
-    visitor = CreateLambdaTerm()
-    visitor.visit(ast)
-    # print(visitor.term)
-    # print(visitor.vars)
-    unparser = Unparser()
-    return unparser.visit(visitor.term)
+class LambdaToAst(NodeVisitor):
+    parent: AST
+    def __init__(self):
+        self.parent = None  # type: ignore
+
+    def visit(self, node: Term):
+        print(f"visit({dump(node)}, parent={dump(self.parent) if self.parent else None})")
+        if isinstance(node, Var):
+            self.visit_Var(node)
+        elif isinstance(node, Lam):
+            self.visit_Lam(node)
+        elif isinstance(node, App):
+            self.visit_App(node)
+        else:
+            self.parent = node
+            super().visit(node)
+
+
+    def visit_Var(self, node: Var):
+        ...
+
+    def visit_Lam(self, node: Lam):
+        ...
+
+    def visit_App(self, node: App):
+        ...
+
+def lc_to_ast(term: Term) -> AST:
+    visitor = LambdaToAst()
+    visitor.visit(term)
+    return visitor.parent
 
 def plc(f):
     """Pretty-print a lambda calculus term from a Python lambda function."""
     print(lc(f))
 
 def assert_lc(f, expected: str):
-    term = lc(f)
+    term = str(lc(f))
     print(f"term: {term}")
-    assert term == expected, f"Expected: {expected}, got: {term}"
+    assert term == expected, f"Expected: {expected!r}, got: {term!r}"
 
 if __name__ == "__main__":
+    print("Testing lc...")
     l = lambda x: x
     assert_lc(l, "λx0.(x0)")
     l = lambda x: lambda y: x
@@ -173,4 +230,13 @@ if __name__ == "__main__":
     assert_lc(t, "λx0.(λx1.(x0(l(x1))))")
     l = lambda x, y: x(y)
     assert_lc(l, "λx0.(λx1.(x0(x1)))")
+    l = lambda x, y, z: x(y, z)
+    assert_lc(l, "λx0.(λx1.(λx2.(x0(x1)(x2))))")
+    print("Testing compilation...")
+    l = lambda x, y, z: x(y, z)
+    term = lc(l)
+    print(f"term: {term}")
+    pp(term)
+    ast = lc_to_ast(term)
+    print(f"ast: {dump(ast)}")
     print("All tests passed.")
