@@ -1,9 +1,11 @@
 from __future__ import annotations
-from ast import dump as ast_dump, parse, NodeVisitor, AST, _Unparser
+from ast import dump as ast_dump, iter_fields, parse
+import ast
+_Unparser = getattr(ast, "_Unparser")
 from inspect import getsource
 from textwrap import dedent
-from types import CodeType
 from pprint import pp
+from typing import cast
 from scope import Scope
 from pretty import Pretty
 
@@ -19,7 +21,7 @@ def pretty(printer, obj, stream, indent, allowance, context, level):
     printer._format_namespace_items(items, stream, indent, allowance, context, level)
     stream.write(')')
 
-class Var(metaclass=Pretty):
+class Var(ast.expr, metaclass=Pretty):
     _pretty_fields = ("name",)
     def __init__(self, id: int):
         self.id = id
@@ -36,10 +38,10 @@ class Var(metaclass=Pretty):
     def __pretty__(printer, self, stream, indent, allowance, context, level):
         pretty(printer, self, stream, indent, allowance, context, level)
 
-class Lam(metaclass=Pretty):
+class Lam(ast.expr, metaclass=Pretty):
     _fields = ("var", "body")
     _pretty_fields = _fields
-    def __init__(self, var: Var, body: Term):
+    def __init__(self, var: Var, body: ast.expr):
         self.var = var
         self.body = body
 
@@ -54,10 +56,10 @@ class Lam(metaclass=Pretty):
         pretty(printer, self, stream, indent, allowance, context, level)
 
 
-class App(metaclass=Pretty):
+class App(ast.expr, metaclass=Pretty):
     _fields = ("func", "arg")
     _pretty_fields = _fields
-    def __init__(self, func: Term, arg: Term):
+    def __init__(self, func: ast.expr, arg: ast.expr):
         self.func = func
         self.arg = arg
 
@@ -71,14 +73,25 @@ class App(metaclass=Pretty):
     def __pretty__(printer, self, stream, indent, allowance, context, level):
         pretty(printer, self, stream, indent, allowance, context, level)
 
-type Term = Lam | App | Var | AST
+class Term(ast.Expression, metaclass=Pretty):
+    _pretty_fields = ("body",)
 
-class CreateLambdaTerm(NodeVisitor):
-    term: Term
+    def __repr__(self):
+        return repr(self.body)
+
+    def __str__(self):
+        return str(self.body)
+
+    @staticmethod
+    def __pretty__(printer, self, stream, indent, allowance, context, level):
+        pretty(printer, self, stream, indent, allowance, context, level)
+
+class CreateLambdaTerm(ast.NodeVisitor):
+    term: ast.expr
     vars: Scope[str, Var]
     max_var: int
     first: bool
-    ast: AST
+    ast: ast.AST
     def __init__(self, vars=None):
         self.term = None  # type: ignore
         self.vars = vars or Scope()
@@ -94,7 +107,7 @@ class CreateLambdaTerm(NodeVisitor):
             # print("=" * 40)
             self.first = False
             self.ast = node
-        self.term = node
+        self.term = node # type: ignore
         return super().visit(node)
 
     def new_var(self) -> Var:
@@ -102,7 +115,7 @@ class CreateLambdaTerm(NodeVisitor):
         self.max_var += 1
         return var
 
-    def visit_Lambda(self, node):
+    def visit_Lambda(self, node: ast.Lambda):
         # print(f"visit_Lambda({dump(node)})")
         self.vars.enter()
         params = []
@@ -113,7 +126,7 @@ class CreateLambdaTerm(NodeVisitor):
             self.vars[var_name] = var
             params.append(var)
         self.generic_visit(node)
-        body = self.term
+        body: ast.expr = self.term  # type: ignore
         for var in reversed(params):
             body = Lam(var, body)
         self.term = body
@@ -129,22 +142,26 @@ class CreateLambdaTerm(NodeVisitor):
     def visit_Call(self, node):
         # print(f"visit_Call({dump(node)})")
         self.visit(node.func)
-        func = self.term
+        func: ast.expr = self.term  # type: ignore
         for arg in node.args:
             # print(f"arg: {dump(arg)}")
             self.visit(arg)
-            func = App(func, self.term)
+            arg: ast.expr = self.term  # type: ignore
+            func = App(func, arg)
         self.term = func
+
+    def result(self) -> Term:
+        return Term(body=self.term)
 
 def lc(f) -> Term:
     """Convert a Python lambda function to a lambda calculus term."""
     src = dedent(getsource(f))
-    ast = parse(src, mode="exec")
+    tree = parse(src)
     visitor = CreateLambdaTerm()
-    visitor.visit(ast)
+    visitor.visit(tree)
     # print(visitor.term)
     # print(visitor.vars)
-    return visitor.term
+    return visitor.result()
 
 class Unparser(_Unparser):
     def traverse(self, node):
@@ -171,41 +188,98 @@ class Unparser(_Unparser):
     def visit_Var(self, node):
         self.write(str(node))
 
-def unparse(term: Term) -> str:
+def unparse(term: ast.AST) -> str:
     unparser = Unparser()
     return unparser.visit(term)
 
-class LambdaToAst(NodeVisitor):
-    parent: AST
+class LambdaToAst(ast.NodeVisitor):
+    ast: ast.AST
+    first: bool
     def __init__(self):
-        self.parent = None  # type: ignore
+        self.ast = None  # type: ignore
+        self.first = True
 
-    def visit(self, node: Term):
-        print(f"visit({dump(node)}, parent={dump(self.parent) if self.parent else None})")
-        if isinstance(node, Var):
-            self.visit_Var(node)
-        elif isinstance(node, Lam):
-            self.visit_Lam(node)
-        elif isinstance(node, App):
-            self.visit_App(node)
-        else:
-            self.parent = node
-            super().visit(node)
+    def visit(self, node: ast.AST):
+        if self.first:
+            self.first = False
+            self.ast = node
+        return super().visit(node)
+
+    def update_parent(self, parent: ast.AST, child: ast.AST, field: str, index: int | None = None):
+        if field is not None:
+            if index is not None:
+                getattr(parent, field)[index] = child
+            else:
+                setattr(parent, field, child)
+
+    def generic_visit(self, node):
+        # print(f"generic_visit({unparse(node)})")
+        for field, value in iter_fields(node):
+            if isinstance(value, list):
+                for index, item in enumerate(value):
+                    if isinstance(item, ast.AST):
+                        new = self.visit(item)
+                        if new is not None:
+                            # if we updated the child, update the parent
+                            # and only visit the new node
+                            self.update_parent(node, new, field=field, index=index)
+                            return self.generic_visit(new)
+            elif isinstance(value, ast.AST):
+                new = self.visit(value)
+                if new is not None:
+                    # if we updated the child, update the parent
+                    # and only visit the new node
+                    self.update_parent(node, new, field=field)
+                    return self.generic_visit(new)
 
 
     def visit_Var(self, node: Var):
-        ...
+        # print(f"visit_Var({node})")
+        new = ast.Name(id=node.name, ctx=ast.Load())
+        self.generic_visit(new)
+        return new
 
     def visit_Lam(self, node: Lam):
-        ...
+        # print(f"visit_Lam({node})")
+        new = ast.Lambda(
+            args=ast.arguments(
+                posonlyargs=[],
+                args=[ast.arg(arg=node.var.name)],
+                kwonlyargs=[],
+                kw_defaults=[],
+                defaults=[],
+            ),
+            body=node.body,
+        )
+        self.generic_visit(new)
+        return new
 
     def visit_App(self, node: App):
-        ...
+        # print(f"visit_App({node})")
+        new = ast.Call(
+            func=node.func,
+            args=[node.arg],
+            keywords=[],
+        )
+        self.generic_visit(new)
+        return new
 
-def lc_to_ast(term: Term) -> AST:
+    def result(self) -> ast.Expression:
+        expr = cast(ast.Expression, self.ast)
+        return ast.Expression(body=expr.body)
+
+
+def lc_to_ast(term: ast.AST) -> ast.Expression:
     visitor = LambdaToAst()
     visitor.visit(term)
-    return visitor.parent
+    res = visitor.result()
+    return res
+
+_compile = compile
+def compile(obj, *args, **kwargs):
+    if isinstance(obj, ast.AST):
+        obj = lc_to_ast(obj)
+    _compile(obj, *args, **kwargs)
 
 def plc(f):
     """Pretty-print a lambda calculus term from a Python lambda function."""
@@ -216,27 +290,43 @@ def assert_lc(f, expected: str):
     print(f"term: {term}")
     assert term == expected, f"Expected: {expected!r}, got: {term!r}"
 
-if __name__ == "__main__":
+def test_front():
     print("Testing lc...")
-    l = lambda x: x
-    assert_lc(l, "λx0.(x0)")
-    l = lambda x: lambda y: x
-    assert_lc(l, "λx0.(λx1.(x0))")
-    l = lambda x: lambda y: y
-    assert_lc(l, "λx0.(λx1.(x1))")
-    l = lambda x: lambda y: x(y)
-    assert_lc(l, "λx0.(λx1.(x0(x1)))")
-    t = lambda f: lambda x: f(l(x))
-    assert_lc(t, "λx0.(λx1.(x0(l(x1))))")
-    l = lambda x, y: x(y)
-    assert_lc(l, "λx0.(λx1.(x0(x1)))")
-    l = lambda x, y, z: x(y, z)
-    assert_lc(l, "λx0.(λx1.(λx2.(x0(x1)(x2))))")
+    a = lambda x: x
+    assert_lc(a, "λx0.(x0)")
+    b = lambda x: lambda y: x
+    assert_lc(b, "λx0.(λx1.(x0))")
+    c = lambda x: lambda y: y
+    assert_lc(c, "λx0.(λx1.(x1))")
+    d = lambda x: lambda y: x(y)
+    assert_lc(d, "λx0.(λx1.(x0(x1)))")
+    e = lambda f: lambda x: f(d(x))
+    assert_lc(e, "λx0.(λx1.(x0(d(x1))))")
+    f = lambda x, y: x(y)
+    assert_lc(f, "λx0.(λx1.(x0(x1)))")
+    g = lambda x, y, z: x(y, z)
+    assert_lc(g, "λx0.(λx1.(λx2.(x0(x1)(x2))))")
     print("Testing compilation...")
-    l = lambda x, y, z: x(y, z)
-    term = lc(l)
+    h = lambda x, y, z: x(y, z)
+    term = lc(h)
     print(f"term: {term}")
     pp(term)
-    ast = lc_to_ast(term)
-    print(f"ast: {dump(ast)}")
+    tree = lc_to_ast(term)
+    print(f"tree: {dump(tree)}")
+
+def compare_ast(term: ast.AST, expected: str):
+    tree = lc_to_ast(term)
+    src = unparse(tree)
+    print(f"src: {src}")
+    assert src == expected, f"Expected: {expected!r}, got: {src!r}"
+
+def test_back():
+    print("Testing back conversion from LC to Python AST...")
+    g = lambda x, y, z: x(y, z)
+    term = lc(g)
+    compare_ast(term, "lambda x0: lambda x1: lambda x2: x0(x1)(x2)")
+
+if __name__ == "__main__":
+    test_front()
+    test_back()
     print("All tests passed.")
