@@ -1,4 +1,5 @@
 from __future__ import annotations
+from functools import wraps
 from ast import dump as ast_dump, iter_fields, parse
 import ast
 _Unparser = getattr(ast, "_Unparser")
@@ -6,11 +7,23 @@ from inspect import getsource
 from textwrap import dedent
 from pprint import pp
 from typing import cast
-from scope import Scope
-from pretty import Pretty
+from .scope import Scope
+from .pretty import Pretty
 
 def dump(node):
     return ast_dump(node, indent=4)
+
+def banner(msg, char="=", width=60):
+    sz = len(msg) + 2
+    if sz >= width:
+        print(char * width)
+        print(msg)
+        print(char * width)
+        return
+    diff = width - sz
+    l = diff // 2
+    r = diff - l
+    print(char * l, msg, char * r)
 
 def pretty(printer, obj, stream, indent, allowance, context, level):
     cls_name = obj.__class__.__name__
@@ -86,6 +99,10 @@ class Term(ast.Expression, metaclass=Pretty):
     def __pretty__(printer, self, stream, indent, allowance, context, level):
         pretty(printer, self, stream, indent, allowance, context, level)
 
+    def compile(self):
+        code = compile(self, "<lc>", mode="eval")
+        return code
+
 class CreateLambdaTerm(ast.NodeVisitor):
     term: ast.expr
     vars: Scope[str, Var]
@@ -151,6 +168,7 @@ class CreateLambdaTerm(ast.NodeVisitor):
         self.term = func
 
     def result(self) -> Term:
+        ast.fix_missing_locations(self.term)
         return Term(body=self.term)
 
 def lc(f) -> Term:
@@ -266,6 +284,7 @@ class LambdaToAst(ast.NodeVisitor):
 
     def result(self) -> ast.Expression:
         expr = cast(ast.Expression, self.ast)
+        ast.fix_missing_locations(expr)
         return ast.Expression(body=expr.body)
 
 
@@ -276,13 +295,16 @@ def lc_to_ast(term: ast.AST) -> ast.Expression:
     return res
 
 _compile = compile
+@wraps(_compile)
 def compile(obj, *args, **kwargs):
     if isinstance(obj, ast.AST):
         obj = lc_to_ast(obj)
-    _compile(obj, *args, **kwargs)
+    return _compile(obj, *args, **kwargs)
 
-def plc(f):
+def plc(f, title=""):
     """Pretty-print a lambda calculus term from a Python lambda function."""
+    if title:
+        print(title, end=" = ")
     print(lc(f))
 
 def assert_lc(f, expected: str):
