@@ -1,5 +1,14 @@
 from lc.lc import *
 
+# First a bit of history:
+# Alonzo Church (1903-1995) was a computer scientist, mathematician and logician
+# He invented lambda calculus in the 1930s as part of his research into the foundations of mathematics
+# He notably showed that the lambda calculus is Turing complete
+# (and that turing machines are 'lambda complete' too),
+# and that the halting problem is undecidable
+# He also invented Church encoding, a means of representing data and operators in the lambda calculus
+# This presentation is an exploration of his work
+
 # Let's take a simple Python function, a factorial
 # fact(0) = 1
 # fact(n) = n * fact(n-1)
